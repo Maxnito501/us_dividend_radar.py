@@ -34,15 +34,18 @@ STOCK_DB = {
 
 ALL_TICKERS = list(STOCK_DB.keys())
 
-# --- 3. เครื่องยนต์ซ่อมแซมระบบดึงข้อมูลแบบ Single-Fetch การันตีค่าไม่หลุด None ---
+# --- 3. เครื่องยนต์ซ่อมแซมระบบดึงข้อมูล ยุบตาราง Multi-Index ป้องกันตรรกะเอ๋อ ---
 @st.cache_data(ttl=1800)
 def fetch_single_stock_data(ticker):
     try:
-        # ดึงแยกรายตัวเพื่อตัดปัญหาโครงสร้างคอลัมน์ซ้อนกันในระบบแคช
         df = yf.download(ticker, period="1y", interval="1d", auto_adjust=True, progress=False)
         if df.empty or len(df) < 50: return None
         
-        # คำนวณอินดิเคเตอร์เทคนิคัลทีละหน้าเสื่อข้อมูลดิบ
+        # 🔥 [จุดผ่าตัดล้างบั๊ก]: ถล่มหัวตาราง Multi-Index ยุบเหลือชั้นเดียวเพื่อความชัวร์ 100%
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        # คำนวณอินดิเคเตอร์เทคนิคัลด้วยดาต้าชีตที่คลีนสะอาดเรียบร้อย
         df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
         df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
         df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
@@ -62,7 +65,7 @@ with st.spinner('กำลังเชื่อมต่อระบบเรด
     for ticker in ALL_TICKERS:
         df = fetch_single_stock_data(ticker)
         if df is not None:
-            # ใช้ฟังก์ชัน .item() หรือดึงค่า scalar ป้องกันปัญหาโครงสร้างข้อมูลตารางหลุด
+            # ดึงค่าแบบ Scalar ผ่านฟังก์ชัน เพื่อไม่ให้คัดลอกพารามิเตอร์ผิดฝั่ง
             price = float(df['Close'].iloc[-1])
             rsi = float(df['RSI'].iloc[-1])
             ema200 = float(df['EMA200'].iloc[-1])
@@ -73,19 +76,18 @@ with st.spinner('กำลังเชื่อมต่อระบบเรด
             vol_status = "🐳 วาฬเข้าสอย!" if vol_today > (vol_sma * 1.5) else "ปกติ"
             trend = "🐂 ขาขึ้นแกร่ง" if price > ema200 else "🐻 ขาลงพักฐาน"
             
-            # ล็อกเงื่อนไขการตรวจสอบ Action ตามระเบียบวินัยเทคนิคัล First
             if rsi <= 40:
                 action = "🟢 BUY DIP (จังหวะสับไกช้อนของถูก!)"
-                status_color = "#dcfce7"  # สีเขียวอ่อนมั่งคั่ง
+                status_color = "#dcfce7"
             elif rsi >= 70:
                 action = "🔴 TAKE PROFIT (โซนตึงตัวเฉือนขาย)"
-                status_color = "#fee2e2"  # สีแดงแจ้งเตือนระวังภัย
+                status_color = "#fee2e2"
             elif 40 < rsi <= 50 and price > ema200:
                 action = "🛒 ACCUMULATE (สะสมพลังงาน DCA เพิ่ม)"
-                status_color = "#e0f2fe"  # สีฟ้ารับของยกฐาน
+                status_color = "#e0f2fe"
             else:
                 action = "⏳ HOLD & DCA ON TIMING (ถือรันวินัยปกติ)"
-                status_color = "#f3f4f6"  # สีเทาแช่เย็นนิ่งสงบ
+                status_color = "#f3f4f6"
                 
             data_rows.append({
                 "Category": info['Type'], "Symbol": info['Name'], "Ticker": ticker, 
@@ -95,7 +97,6 @@ with st.spinner('กำลังเชื่อมต่อระบบเรด
 
 if data_rows:
     res_df = pd.DataFrame(data_rows)
-    # แสดงตารางหลักหน้าร้านมือถือแบบล็อกแถบสีพื้นหลังตรงตามออเดอร์
     st.dataframe(
         res_df.style.apply(lambda r: [f'background-color: {r["Color"]}']*len(r), axis=1).format({"Price": "${:,.2f}", "RSI": "{:.1f}"}),
         column_order=["Category", "Symbol", "Price", "RSI", "Volume", "Trend", "Action"],
@@ -111,7 +112,6 @@ if data_rows:
         selected_name = st.selectbox("เลือกม้าศึกส่องกล้อง:", res_df['Symbol'])
         selected_ticker = res_df[res_df['Symbol'] == selected_name]['Ticker'].values[0]
         
-        # ดึงข้อมูลมาวาดกราฟแท่งเทียนเรียลไทม์
         df_chart = fetch_single_stock_data(selected_ticker)
         if df_chart is not None:
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
@@ -122,7 +122,6 @@ if data_rows:
             fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
             fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
             
-            # คุมสีแท่งโวลุ่มซื้อขายหน้าร้าน
             v_colors = ['green' if df_chart['Close'].iloc[i] > df_chart['Open'].iloc[i] else 'red' for i in range(len(df_chart))]
             fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume'], name='Volume', marker_color=v_colors), row=3, col=1)
             fig.update_layout(height=550, xaxis_rangeslider_visible=False, template="plotly_white", margin=dict(l=20, r=20, t=20, b=20))
@@ -140,13 +139,13 @@ if data_rows:
             unrealized = (curr_price - avg_cost) * qty
             pct = (unrealized / (avg_cost * qty)) * 100
             if unrealized < 0:
-                st.error(f"📉 สถานะ: ขาดทุนทางบัญชี {pct:.2f}% (${abs(unrealized):,.2f})")
+                st.error(f"📉 Status: ขาดทุนทางบัญชี {pct:.2f}% (${abs(unrealized):,.2f})")
                 if curr_rsi <= 40:
                     st.markdown('<div class="status-box buy-box">💉 คำสั่งรบ: RSI ต่ำติดดินตามเป้า! สับไก DCA อัดกระสุนเพิ่มจังหวะย่อทองคำ!</div>', unsafe_allow_html=True)
                 else:
                     st.markdown('<div class="status-box wait-box">⏳ คำสั่งรบ: นั่งทับมือนิ่ง ๆ ปล่อยให้ระบบ DCA ทำงานตามรอบปกติ ไม่รีบเติมเงิน</div>', unsafe_allow_html=True)
             else:
-                st.success(f"🎉 สถานะ: กำไรสะสมหล่อ ๆ {pct:.2f}% (${unrealized:,.2f})")
+                st.success(f"🎉 Status: กำไรสะสมหล่อ ๆ {pct:.2f}% (${unrealized:,.2f})")
                 if curr_rsi >= 70:
                     st.markdown('<div class="status-box sell-box">🔥 คำสั่งรบ: RSI ทะลัก Overbought ตึงเปรี๊ยะ! แบ่งตัวเฉือนขายล็อกกำไรเข้าเซฟด่วน!</div>', unsafe_allow_html=True)
                 else:
